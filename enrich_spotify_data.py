@@ -1,6 +1,3 @@
-#TODO: add to the read me adn the top of the file for rules and how to use it (+ what code does)
-#TODO: implement better comments so code is clear
-
 import json
 import os
 import re
@@ -15,17 +12,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-#config - pull from .env
+#config info
 
 SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 LASTFM_API_KEY        = os.getenv("LASTFM_API_KEY", "")
+SOUNDCHARTS_APP_ID    = os.getenv("SOUNDCHARTS_APP_ID", "")
+SOUNDCHARTS_API_KEY   = os.getenv("SOUNDCHARTS_API_KEY", "")
 
-OUTPUT_FILE = "streaming_history_enriched.json"
-MB_USER_AGENT = "SpotifyHistoryEnricher/1.0 (email@email.com)"  # TODO: PUT YOUR EMAIL HERE
+OUTPUT_FILE   = "streaming_history_enriched.json"
+MB_USER_AGENT = "SpotifyHistoryEnricher/1.0 (email@email.com)"  # update with your email
 
 
-# cleaning lastfm tags cause they're informal and created by users
+#lastfm tag cleaning (hopefully works..?)
 LASTFM_JUNK = re.compile(
     r"^(\d+s?$|seen live|favourite|favorites|loved|amazing|awesome|beautiful|"
     r"best|cool|epic|great|heard on|like$|love$|my |owned|perfect|under \d+|"
@@ -44,7 +43,93 @@ def is_good_tag(tag: str) -> bool:
     return True
 
 
-#spotify helpers
+#soundcharts helpers
+
+SC_BASE = "https://customer.api.soundcharts.com"
+
+SC_AUDIO_FEATURE_KEYS = [
+    "danceability", "energy", "loudness", "mode", "speechiness",
+    "acousticness", "instrumentalness", "liveness", "valence",
+    "tempo", "key", "time_signature",
+]
+
+
+def fetch_soundcharts_song(track_id):
+    """
+    Look up a song on SoundCharts by Spotify track ID.
+    Returns the full song dict from the API, or None on failure.
+
+    Endpoint: GET /api/v2.25/song/by-platform/spotify/{track_id}
+    Docs: https://developers.soundcharts.com/documentation/reference/song/get-song-by-platform-id
+    """
+    if not SOUNDCHARTS_APP_ID or not SOUNDCHARTS_API_KEY:
+        return None
+
+    url = f"{SC_BASE}/api/v2.25/song/by-platform/spotify/{track_id}"
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "x-app-id":  SOUNDCHARTS_APP_ID,
+                "x-api-key": SOUNDCHARTS_API_KEY,
+            },
+            timeout=10,
+        )
+        if resp.status_code == 404:
+            return None 
+        if resp.status_code == 403:
+            print("\n  ⚠️  SoundCharts returned 403 — check your app ID / API key or plan.")
+            return None
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 2))
+            print(f"\n  Rate limited by SoundCharts. Waiting {wait}s...")
+            time.sleep(wait)
+            resp = requests.get(url, headers={
+                "x-app-id": SOUNDCHARTS_APP_ID,
+                "x-api-key": SOUNDCHARTS_API_KEY,
+            }, timeout=10)
+        if not resp.ok:
+            return None
+        return resp.json()
+    except requests.exceptions.RequestException:
+        return None
+
+
+def parse_soundcharts_response(data):
+    """
+    Extract audio features and genres from a SoundCharts song response.
+    Returns (audio_features_dict, genres_list).
+
+    SoundCharts puts everything inside data["song"] — audio features
+    are top-level fields on the song object alongside title, isrc, etc.
+    Genres come from data["song"]["genres"] as a list of genre objects.
+    """
+    if not data:
+        return None, []
+
+    song = data.get("song") or data.get("item") or data
+    if not song:
+        return None, []
+
+# extract audio features
+    audio_features = {
+        k: song[k] for k in SC_AUDIO_FEATURE_KEYS if k in song and song[k] is not None
+    }
+
+# extract genres from SC — returns them as list of objects with "name" field
+    raw_genres = song.get("genres", [])
+    if isinstance(raw_genres, list):
+        genres = [
+            g["name"].lower() if isinstance(g, dict) else str(g).lower()
+            for g in raw_genres if g
+        ]
+    else:
+        genres = []
+
+    return (audio_features if audio_features else None), genres
+
+
+#spotify helpers 
 
 def get_spotify_token():
     creds = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
@@ -75,11 +160,6 @@ def spotify_get(token, url, params=None, retries=3):
 
 
 def fetch_track_artist_id(token, track_id):
-    """
-    Fetch a single track to get its primary artist ID.
-    Uses /tracks/{id} (single) because the batch /tracks endpoint
-    returns 403 for newer Spotify apps.
-    """
     resp = spotify_get(token, f"https://api.spotify.com/v1/tracks/{track_id}")
     if not (resp and resp.ok):
         return None
@@ -88,7 +168,6 @@ def fetch_track_artist_id(token, track_id):
 
 
 def fetch_artist_genres(token, artist_id):
-    """Fetch genres for a single artist."""
     resp = spotify_get(token, f"https://api.spotify.com/v1/artists/{artist_id}")
     if not (resp and resp.ok):
         return []
@@ -96,7 +175,6 @@ def fetch_artist_genres(token, artist_id):
 
 
 def fetch_audio_features_batch(token, track_ids):
-    """Returns dict {track_id: features} or None if endpoint returns 403."""
     resp = spotify_get(
         token,
         "https://api.spotify.com/v1/audio-features",
@@ -109,10 +187,9 @@ def fetch_audio_features_batch(token, track_ids):
     return {f["id"]: f for f in resp.json().get("audio_features", []) if f}
 
 
-#lastfm helpers
+#lastfm
 
 def fetch_lastfm_tags(artist, track, limit=8):
-    """Fetch and clean tags. Falls back to artist tags if track has none."""
     if not LASTFM_API_KEY:
         return []
 
@@ -130,7 +207,6 @@ def fetch_lastfm_tags(artist, track, limit=8):
 
     data = _get("track.getTopTags", artist=artist, track=track, autocorrect=1)
     raw = data.get("toptags", {}).get("tag", [])
-
     if not raw:
         data = _get("artist.getTopTags", artist=artist, autocorrect=1)
         raw = data.get("toptags", {}).get("tag", [])
@@ -141,7 +217,6 @@ def fetch_lastfm_tags(artist, track, limit=8):
 #musicbrainz helpers
 
 def fetch_musicbrainz_tags(artist, track):
-    """Search MusicBrainz for a recording and return its tags. 1 req/sec limit."""
     try:
         resp = requests.get(
             "https://musicbrainz.org/ws/2/recording/",
@@ -193,14 +268,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", nargs="+", default=["data/Streaming_History_Audio_*.json"])
     parser.add_argument("--output", default=OUTPUT_FILE)
+    parser.add_argument("--skip-soundcharts",    action="store_true")
     parser.add_argument("--skip-audio-features", action="store_true")
-    parser.add_argument("--skip-spotify-genres", action="store_true",
-                        help="Skip Spotify genre lookup (saves time if your app gets 403 on /tracks)")
-    parser.add_argument("--skip-musicbrainz", action="store_true")
+    parser.add_argument("--skip-spotify-genres", action="store_true")
+    parser.add_argument("--skip-musicbrainz",    action="store_true")
     args = parser.parse_args()
 
-    #load data
-
+#load data
     print("Loading streaming history...")
     entries = load_history_files(args.input)
     if not entries:
@@ -212,7 +286,7 @@ def main():
     unique_track_ids = list({extract_track_id(e["spotify_track_uri"]) for e in track_entries})
     print(f"Track entries: {len(track_entries)} | Unique tracks: {len(unique_track_ids)}")
 
-    #auth (spotify)
+#spotify auth
     print("\nAuthenticating with Spotify...")
     token = get_spotify_token()
     token_time = time.time()
@@ -223,67 +297,85 @@ def main():
             token = get_spotify_token()
             token_time = time.time()
 
-    #doesn't work, skip on run (spotify closed their audio features part in 2024)
+#soundcharts, hopefully my goat
+    sc_audio_features_map = {}  # track_id -> audio features dict
+    sc_genres_map         = {}  # track_id -> genres list
 
+    if not args.skip_soundcharts:
+        if not SOUNDCHARTS_APP_ID or not SOUNDCHARTS_API_KEY:
+            print("\nSkipping SoundCharts (no SOUNDCHARTS_APP_ID or SOUNDCHARTS_API_KEY in .env).")
+        else:
+            print(f"\nFetching SoundCharts metadata for {len(unique_track_ids)} tracks...")
+            print("  (1 call/track — gets audio features + genres together)")
+
+            sc_errors = 0
+            for track_id in tqdm(unique_track_ids):
+                data = fetch_soundcharts_song(track_id)
+                features, genres = parse_soundcharts_response(data)
+                if features:
+                    sc_audio_features_map[track_id] = features
+                if genres:
+                    sc_genres_map[track_id] = genres
+                if data is None:
+                    sc_errors += 1
+                    if sc_errors == 3:
+                        print("\n   3 consecutive SoundCharts errors — check credentials.")
+                else:
+                    sc_errors = 0
+                time.sleep(0.1)  # ~10 req/sec, conservative
+
+            print(f"  Got audio features for {len(sc_audio_features_map)} tracks.")
+            print(f"  Got genres for        {len(sc_genres_map)} tracks.")
+
+            if len(sc_audio_features_map) == 0 and len(sc_genres_map) == 0:
+                print("  No data returned — you may be on the sandbox plan (limited catalog).")
+                print("     Sandbox only covers a small set of test tracks.")
+
+#spotify audio features - depricated
     audio_features_map = {}
 
     if not args.skip_audio_features:
-        print("\nFetching audio features (batches of 100)...")
+        print("\nFetching Spotify audio features (batches of 100)...")
         for batch in tqdm(list(chunked(unique_track_ids, 100))):
             maybe_refresh()
             result = fetch_audio_features_batch(token, batch)
             if result is None:
-                print("\n  ⚠️  Audio features returned 403 — deprecated for new Spotify apps.")
+                print("\n  ⚠️  Spotify audio features returned 403 (deprecated for new apps).")
                 print("     Re-run with --skip-audio-features to suppress this.")
                 break
             audio_features_map.update(result)
             time.sleep(0.1)
         print(f"  Got audio features for {len(audio_features_map)} tracks.")
 
-    #spotify genres
-
-    # Use single-track fetches (/tracks/{id}) because the batch
-    # endpoint (/tracks?ids=...) returns 403 for newer Spotify developer apps as of 2024 i guess.
+#spotify genres - depricated
     track_spotify_genres = {}
 
     if not args.skip_spotify_genres:
         print(f"\nFetching artist IDs via single-track calls ({len(unique_track_ids)} tracks)...")
-        print("  (Using single fetches — Spotify batch endpoint is 403 for new apps)")
-
         track_to_artist_id = {}
         for track_id in tqdm(unique_track_ids):
             maybe_refresh()
-            artist_id = fetch_track_artist_id(token, track_id) #TODO: DEBUG - figure out why this isn't getting a response
+            artist_id = fetch_track_artist_id(token, track_id)
             if artist_id:
                 track_to_artist_id[track_id] = artist_id
-            time.sleep(0.05)  # ~20 req/sec, API rate limits
+            time.sleep(0.05)
 
-        print(f"  Mapped {len(track_to_artist_id)} / {len(unique_track_ids)} tracks")
-
-        # make it so its only unique artists (spotify does genres by artist)
         unique_artist_ids = list(set(track_to_artist_id.values()))
         print(f"Fetching genres for {len(unique_artist_ids)} unique artists...")
         artist_genres_map = {}
-
         for artist_id in tqdm(unique_artist_ids):
             maybe_refresh()
-            genres = fetch_artist_genres(token, artist_id)
-            artist_genres_map[artist_id] = genres
+            artist_genres_map[artist_id] = fetch_artist_genres(token, artist_id)
             time.sleep(0.05)
 
         track_spotify_genres = {
             tid: artist_genres_map.get(aid, [])
             for tid, aid in track_to_artist_id.items()
         }
-
         genre_count = sum(1 for g in track_spotify_genres.values() if g)
         print(f"  Tracks with Spotify genres: {genre_count} / {len(unique_track_ids)}")
-        if genre_count == 0:
-            print("  ℹ️  All artists returned empty genres — Spotify hasn't classified them.")
-            print("     This is common for niche artists. Last.fm will cover these.")
 
-    #lastfm
-
+#lastfm
     lastfm_cache = {}
 
     if LASTFM_API_KEY:
@@ -308,8 +400,7 @@ def main():
     else:
         print("\nSkipping Last.fm (no LASTFM_API_KEY in .env).")
 
-    #musicbrainz
-
+#musicbrainz
     mb_cache = {}
 
     if not args.skip_musicbrainz:
@@ -320,7 +411,8 @@ def main():
             artist = e.get("master_metadata_album_artist_name", "")
             track  = e.get("master_metadata_track_name", "")
             key    = (artist, track)
-            if (not track_spotify_genres.get(tid)
+            if (not sc_genres_map.get(tid)
+                    and not track_spotify_genres.get(tid)
                     and not lastfm_cache.get(key)
                     and key not in seen_mb
                     and any(key)):
@@ -340,12 +432,11 @@ def main():
     else:
         print("\nSkipping MusicBrainz (--skip-musicbrainz flag).")
 
-    #add the tags
-
+#enriching
     print("\nApplying enrichment to all entries...")
-    FEATURE_KEYS = ["danceability", "energy", "key", "loudness", "mode",
-                    "speechiness", "acousticness", "instrumentalness",
-                    "liveness", "valence", "tempo", "time_signature"]
+    SPOTIFY_FEATURE_KEYS = ["danceability", "energy", "key", "loudness", "mode",
+                            "speechiness", "acousticness", "instrumentalness",
+                            "liveness", "valence", "tempo", "time_signature"]
 
     for entry in entries:
         tid    = extract_track_id(entry.get("spotify_track_uri"))
@@ -353,27 +444,40 @@ def main():
         track  = entry.get("master_metadata_track_name", "")
         key    = (artist, track)
 
-        features = audio_features_map.get(tid) if tid else None
-        entry["audio_features"] = (
-            {k: features[k] for k in FEATURE_KEYS if k in features} if features else None
-        )
+#sound charts audio features
+        sc_feat = sc_audio_features_map.get(tid) if tid else None
+        sp_feat = audio_features_map.get(tid) if tid else None
+        if sc_feat:
+            entry["audio_features"] = sc_feat
+        elif sp_feat:
+            entry["audio_features"] = {k: sp_feat[k] for k in SPOTIFY_FEATURE_KEYS if k in sp_feat}
+        else:
+            entry["audio_features"] = None
+
+        # Genres/tags: SoundCharts > Spotify > Last.fm > MusicBrainz
+        entry["sc_genres"]   = sc_genres_map.get(tid, []) if tid else []
         entry["genres"]      = track_spotify_genres.get(tid, []) if tid else []
         entry["lastfm_tags"] = lastfm_cache.get(key, [])
         entry["mb_tags"]     = mb_cache.get(key, [])
-        entry["all_tags"]    = entry["genres"] or entry["lastfm_tags"] or entry["mb_tags"]
+        entry["all_tags"]    = (
+            entry["sc_genres"]
+            or entry["genres"]
+            or entry["lastfm_tags"]
+            or entry["mb_tags"]
+        )
 
-
-    #summary
-
-    with_features = sum(1 for e in entries if e.get("audio_features"))
-    with_genres   = sum(1 for e in entries if e.get("genres"))
-    with_lastfm   = sum(1 for e in entries if e.get("lastfm_tags"))
-    with_mb       = sum(1 for e in entries if e.get("mb_tags"))
-    with_any      = sum(1 for e in entries if e.get("all_tags"))
+#summary print
+    with_features  = sum(1 for e in entries if e.get("audio_features"))
+    with_sc_genres = sum(1 for e in entries if e.get("sc_genres"))
+    with_genres    = sum(1 for e in entries if e.get("genres"))
+    with_lastfm    = sum(1 for e in entries if e.get("lastfm_tags"))
+    with_mb        = sum(1 for e in entries if e.get("mb_tags"))
+    with_any       = sum(1 for e in entries if e.get("all_tags"))
 
     print(f"\n{'='*52}")
     print(f"  Total entries:              {len(entries)}")
     print(f"  With audio features:        {with_features}")
+    print(f"  With SoundCharts genres:    {with_sc_genres}")
     print(f"  With Spotify genres:        {with_genres}")
     print(f"  With Last.fm tags:          {with_lastfm}")
     print(f"  With MusicBrainz tags:      {with_mb}")
@@ -385,11 +489,12 @@ def main():
         json.dump(entries, f, indent=2, ensure_ascii=False)
     print(f"\nSaved to: {out_path.resolve()}")
     print("\nNew fields on each entry:")
-    print("  audio_features — danceability, energy, valence, etc. (None if unavailable)")
+    print("  audio_features — danceability, energy, valence, etc. (SoundCharts > Spotify fallback)")
+    print("  sc_genres      — genres from SoundCharts")
     print("  genres         — Spotify artist genres")
     print("  lastfm_tags    — Last.fm tags (cleaned)")
     print("  mb_tags        — MusicBrainz tags")
-    print("  all_tags       — best available: genres > lastfm_tags > mb_tags")
+    print("  all_tags       — best available: sc_genres > genres > lastfm_tags > mb_tags")
 
 
 if __name__ == "__main__":
