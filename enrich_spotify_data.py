@@ -21,7 +21,7 @@ SOUNDCHARTS_APP_ID    = os.getenv("SOUNDCHARTS_APP_ID", "")
 SOUNDCHARTS_API_KEY   = os.getenv("SOUNDCHARTS_API_KEY", "")
 
 OUTPUT_FILE   = "streaming_history_enriched.json"
-MB_USER_AGENT = "SpotifyHistoryEnricher/1.0 (email@email.com)"  # update with your email
+MB_USER_AGENT = "SpotifyHistoryEnricher/1.0 (email@email.com)"  # update with your email if using musicbrainz (can ignore for now)
 
 
 #lastfm tag cleaning (hopefully works..?)
@@ -42,6 +42,18 @@ def is_good_tag(tag: str) -> bool:
         return False
     return True
 
+#cache soundcharts so i dont lose data if it stops midway
+SOUNDCHARTS_CACHE_FILE = "sc_cache.json"
+
+def load_sc_cache():
+    if os.path.exists(SOUNDCHARTS_CACHE_FILE):
+        with open(SOUNDCHARTS_CACHE_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_sc_cache(cache):
+    with open(SOUNDCHARTS_CACHE_FILE, "w") as f:
+        json.dump(cache, f)
 
 #soundcharts helpers
 
@@ -91,43 +103,52 @@ def fetch_soundcharts_song(track_id):
         if not resp.ok:
             return None
         return resp.json()
+    
     except requests.exceptions.RequestException:
         return None
 
 
 def parse_soundcharts_response(data):
-    """
-    Extract audio features and genres from a SoundCharts song response.
-    Returns (audio_features_dict, genres_list).
-
-    SoundCharts puts everything inside data["song"] — audio features
-    are top-level fields on the song object alongside title, isrc, etc.
-    Genres come from data["song"]["genres"] as a list of genre objects.
-    """
     if not data:
         return None, []
 
-    song = data.get("song") or data.get("item") or data
-    if not song:
+    # Handle both live API response {"object": {...}} 
+    # and cached responses where we stored the inner object directly
+    song = data.get("object") or data if isinstance(data, dict) else None
+    if not song or not isinstance(song, dict):
         return None, []
 
-# extract audio features
+    # Audio features are under "audio", guard against missing/null
+    audio_raw = song.get("audio") or {}
     audio_features = {
-        k: song[k] for k in SC_AUDIO_FEATURE_KEYS if k in song and song[k] is not None
+        "acousticness":     audio_raw.get("acousticness"),
+        "danceability":     audio_raw.get("danceability"),
+        "energy":           audio_raw.get("energy"),
+        "instrumentalness": audio_raw.get("instrumentalness"),
+        "key":              audio_raw.get("key"),
+        "liveness":         audio_raw.get("liveness"),
+        "loudness":         audio_raw.get("loudness"),
+        "mode":             audio_raw.get("mode"),
+        "speechiness":      audio_raw.get("speechiness"),
+        "tempo":            audio_raw.get("tempo"),
+        "time_signature":   audio_raw.get("timeSignature"),
+        "valence":          audio_raw.get("valence"),
     }
+    audio_features = {k: v for k, v in audio_features.items() if v is not None}
 
-# extract genres from SC — returns them as list of objects with "name" field
-    raw_genres = song.get("genres", [])
-    if isinstance(raw_genres, list):
-        genres = [
-            g["name"].lower() if isinstance(g, dict) else str(g).lower()
-            for g in raw_genres if g
-        ]
-    else:
-        genres = []
+    # Genres: {"root": "r&b", "sub": ["r&b, funk & soul"]}
+    genres = []
+    for g in song.get("genres", []):
+        if isinstance(g, dict):
+            if g.get("root"):
+                genres.append(g["root"].lower())
+            for sub in g.get("sub", []):
+                if sub.lower() not in genres:
+                    genres.append(sub.lower())
+        else:
+            genres.append(str(g).lower())
 
     return (audio_features if audio_features else None), genres
-
 
 #spotify helpers 
 
@@ -308,9 +329,18 @@ def main():
             print(f"\nFetching SoundCharts metadata for {len(unique_track_ids)} tracks...")
             print("  (1 call/track — gets audio features + genres together)")
 
+            sc_cache = load_sc_cache()
             sc_errors = 0
+
             for track_id in tqdm(unique_track_ids):
-                data = fetch_soundcharts_song(track_id)
+                if track_id in sc_cache:
+                    data = sc_cache[track_id] 
+                else:
+                    data = fetch_soundcharts_song(track_id)
+                    sc_cache[track_id] = data
+                    save_sc_cache(sc_cache)
+                    time.sleep(0.1)  
+
                 features, genres = parse_soundcharts_response(data)
                 if features:
                     sc_audio_features_map[track_id] = features
@@ -322,7 +352,6 @@ def main():
                         print("\n   3 consecutive SoundCharts errors — check credentials.")
                 else:
                     sc_errors = 0
-                time.sleep(0.1)  # ~10 req/sec, conservative
 
             print(f"  Got audio features for {len(sc_audio_features_map)} tracks.")
             print(f"  Got genres for        {len(sc_genres_map)} tracks.")
