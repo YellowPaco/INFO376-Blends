@@ -91,6 +91,8 @@ python enrich_spotify_data.py \
 
 The `*.json` glob automatically picks up all your Spotify history files and merges them into one enriched output. If you only have one file, you can also just pass it directly:
 
+EXAMPLE BELOW:
+
 ```bash
 python enrich_spotify_data.py \
   --input data/Streaming_History_Audio_0.json \
