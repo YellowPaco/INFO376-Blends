@@ -1,171 +1,283 @@
-# READ BEFORE USE
+# INFO 376 (Spotify) Blends Project
 
-## Requirements to use the code:
+**NOTE FOR TEAM:** For starters, we have 4 users (our team) and thousands of unique tracks combined across our listening histories. That means our system is content-first (audio features \+ tags) with light collaborative filters (how the 4 of us overlap), not a heavy collaborative-filtering system that needs millions of users (hopefully it will be in the future).
 
-Make the following free accounts:
+At a high level, the system is a three-stage hybrid recommender that uses our enriched Spotify listening history (audio features, genre/mood tags, and behavioral signals like skips and time played) to generate personalized, mood-aware playlists. It combines content-based and lightweight collaborative signals.
 
-- [SoundCharts](https://app.soundcharts.com) account - You should get 1000 free credits when you make your account (SOUNDCHARTS_APP_ID and SOUNDCHARTS_API_KEY needed)
-- [LastFM](https://www.last.fm/api/account/create) account (API key needed)
+# Overall System Overview
 
-Extended listening history data from Spotify (MUST be extended listening, have not yet adapted code to the account data format yet)
+## Goals
 
-No longer necessary - related code doesn't have correct functionality
+* Generate personalized playlists that match each team member’s long-term taste and current mood/context.  
+* Use the enriched Spotify data we already have  
+  * Audio features: danceability, energy, valence, tempo, loudness, acousticness, instrumentalness, speechiness, liveness, key, mode, time\_signature.  
+  * Categorical tags: sc\_genres, all\_tags (our main tag set), plus artist and album metadata.  
+  * Behavior: ms\_played, skipped, reason\_start, reason\_end, timestamps (ts), platform, etc.  
+* Implement a hybrid recommender:  
+  * Strong content-based core (driven by each person’s own history and track features).  
+  * Light collaborative/social signal based on overlaps between the 4 users.
 
-- Spotify Premium account to access [Spotify Web API](https://developer.spotify.com/documentation/web-api) (Client ID and Client Secret needed)
-- [MusicBrainz](https://musicbrainz.org/register?returnto=%2F) account (email needed - remove from code when pushing to GitHub for privacy)
-- JSON file of user data from Spotify (in their specific JSON formatting)
+## Three-stages
 
-## Overview
+* **Stage 1 \- Candidate Generation**  
+  * Narrow the full track corpus down to a few thousand to hundreds of candidates per using, using content similarities and simple group statistics.  
+* **Stage 2 \- Hybrid Scoring**  
+  * For each candidate, compute a richer score that combines:  
+    * Content similarity to the user’s taste and current mood  
+    * Light collaborative/group signals (how the other 3 users listen to the track)  
+* **Stage 3 \- Re-ranking & Playlist Construction**  
+  * Apply mood/context logic, skip-based filters, and diversity rules to produce final playlists tailored to each user and each mood.  
+* Each stage is modular and can be implemented and iterated on independently
 
-### What does the code do?
+# Data Model and Core Representations
 
-Takes in Spotify Extended Listening Data and enriches each track entry with music metadata that Spotify doesn't include in their export — specifically audio features (danceability, energy, valence, tempo, etc.) and genre tags. Outputs a new JSON file in the same format as the original Spotify data, with the new fields added to every entry.
+JSON → well-defined tables (CSV) → vectors
 
-### How does the code do this?
+## Raw event format (per play)
 
-Looks up each unique track across three external sources in priority order:
+Each play event (row) from the enriched JSON has fields like:
 
-1. **SoundCharts** (primary) - one API call per track returns both audio features AND genres together. Results are saved to a local `sc_cache.json` file so you never spend credits on a track twice
-2. **Last.fm** (fallback) - fills in genre tags for any tracks SoundCharts didn't cover. Tags are crowd-sourced and automatically cleaned to remove junk entries like "seen live" or "favorite"
-3. **MusicBrainz** (last resort - also isn't currently returning anything) - catches anything still missing after the above two. Free with no account needed, but slow (rate-limited to 1 request/second)
+* Metadata  
+  * master\_metadata\_track\_name  
+  * master\_metadata\_album\_artist name  
+* Behavior  
+  * ts (timestamp)  
+  * platform  
+  * ms\_played  
+* Audio features  
+  * audio\_features: danceability, energy, valence, tempo, loudness, acousticness, instrumentalness, speechiness, liveness, key, mode, time\_signature  
+* Tags  
+  * sc\_genres  
+  * lastfm\_tags  
+  * mb\_tags  
+  * all\_tags (our “best available” tag track)
 
----
+## Item (track) vectors
 
-## Setup
+For each unique track in the combined corpus of all 4 users, we build a canonical item vector:
 
-### Step 1 - Get your Spotify Extended Listening History
+* Continuous features (from audio\_features):  
+  * Ex vector \- \[danceability, energy, valence, tempo, loudness, acousticness, instrumentalness, speechiness, liveness, key, mode, time\_signature\]  
+* Tag/categorical features:  
+  * all\_tags as a TF-IDF vector over a tag vocabulary  
+  * Optionally: sc\_genres mapped into a smaller set of genre groups  
+  * Artist identity (ex: integer ID that can later be embedded for experiments).
 
-1. Log into Spotify and go to [Account Privacy Settings](https://www.spotify.com/account/privacy/)
-2. Scroll down to **Download your data**
-3. Check **Extended streaming history** (do NOT select "Account data", that comes in a different format that is not supported yet)
-4. Click request and wait for Spotify to email you a download link (can take a few days up to a month)
-5. Download and unzip the file. You should have one or more files named `Streaming_History_Audio_0.json`, `Streaming_History_Audio_1.json`, etc.
-6. Put all of these files into a `data/` folder inside your project directory
+We store a track table keyed by spotify\_track\_uri with
 
-### Step 2 - Get your SoundCharts credentials
+* track\_id  
+* Metadata (name, artist, album)  
+* Continuous feature vector  
+* Tag vector
 
-1. Go to [app.soundcharts.com](https://app.soundcharts.com) and create a free account (no payment info needed!!).
-2. You will automatically receive 1000 free API credits
-3. Once logged in, go to **Settings -> API Keys**
-4. You'll see a table with two things:
-   - **App ID** — visible in plain text (looks like `CC-API_XXXXXXXX`) — this is your `SOUNDCHARTS_APP_ID` (put in .env)
-   - **Token** — hidden by default — this is your `SOUNDCHARTS_API_KEY` (put in .env)
-5. Click the eye icon next to the Token to reveal it, or use the copy icon to copy it without revealing
+## User profiles (for 4 users)
 
-> **Important:** You only get 1000 credits total on a free account. Each unique track in your listening history costs 1 credit to look up. The script saves results to `sc_cache.json` after every single track, so if the script stops partway through you won't lose any data. You can just re-run it and it will skip everything already cached. If you run out of credits you can just create a new SoundCharts account and update your `.env` with the new credentials. The cache file makes it so that you only need to fetch the remaining tracks (saves API credits).
+For each of us, we build:
 
-### Step 3 - Get your Last.fm API key
+* **Long-term taste profile**  
+  * Weighted average of item vectors for tracks they’ve listened to  
+  * Weights  
+    * Higher if ms\_played is high (they listened to most of the track)  
+    * Lower or zero if skipped \== true and ms\_played is low  
+  * Result: a single vector representing that user’s “overall taste” across all moods.  
+* **Mood/tempo clusters**  
+  * Take all tracks the user has listened to and consider:  
+    * \[valence, energy, danceability, tempo\] (maybe acousticness).  
+  * Cluster these into a small number of mood clusters per user (ex: 3-5 clusters):  
+    * Cluster example:  
+      * Low energy, low valence, acoustic → “chill/sad/acoustic”  
+      * High energy, high danceability, mid valence → “party/workout”  
+      * Mid energy, 90’s RnB tag→ “throwbacks mood”  
+  * For each cluster, store:  
+    * A centroid vector  
+    * Aggregate tag distribution for that cluster  
+* **Tag distribution per user**  
+  * Aggregate all\_tags (and possibly sc\_genres) over their tracks  
+  * Compute normalized counts or TF-IDF weights per tag  
+  * This captures which tags are especially characteristic of that user (ex: “pop”, “hip-hop”, etc.)  
+* **Simple per-track user stats**  
+  * For each (user, track) pair:  
+    * Number of plays  
+    * Average ms\_played  
+    * Personal skip rate  
+* These representations are computed offline and cached. Should be manageable
 
-1. Go to [last.fm/api/account/create](https://www.last.fm/api/account/create). Log in or create a free account first if you don't have one
-2. Fill out the API account form, you can put anything for the Name/Description
-3. Submit the form and your **API Key** will be available on the next page
-4. Copy the API Key (you do NOT need the Shared Secret for this project) -> put key in .env as `LASTFM_API_KEY`
+# (Spotify) Blends Recommender System Architecture
 
-### Step 4 - Set up your .env file
+## Stage 1 \- Candidate Generation
 
-Create a file called `.env` in your project folder (you can copy from `.env.example`) and fill in your keys:
+For each user, generate a candidate pool of maybe 500-1500 tracks that are likely to be relevant, using fast similarity logic. With thousands of tracks and only 4 users, this should be enough to ensure good coverage while staying efficient.
 
-```
-SOUNDCHARTS_APP_ID=CC-API_XXXXXXXX
-SOUNDCHARTS_API_KEY=your_token_here
-LASTFM_API_KEY=your_lastfm_key_here
-```
+### Candidate Scores
 
-> **Note:** Don't forget to add your `.env` to your `.gitignore`
+We use three main sources (remember with just our team, content-based signals are primary as the “neighbor”/collaborative pieces are small add-ons).
 
-### Step 5 - Install dependencies
+* **Content k-NN (profile/mood → tracks)**  
+  * For each user profiles  
+    1. Use the long-term taste profile vector  
+    2. Use each of their mood centroids  
+  * For each of these vectors  
+    1. Find the nearest tracks in the track space using cosine similarity on continuous features.  
+    2. Tag similarity (ex: cosine / Jaccard on tag vectors)  
+  * Return top N tracks from:  
+    1. Long-term profile neighbors  
+    2. Each mood centroid’s neighbors (mood-specific candidates)  
+  * Filter  
+    1. Drop tracks where this user has a very high personal skip rate  
+    2. Optionally reduce score for tracks overplayed recently  
+* **Tag-based expansion**  
+  * Take the user’s tag distribution:  
+    1. Extract their top K tags (genres)  
+  * For each top tag:  
+    1. Retrieve tracks with that tag in all\_tags and that are:  
+       * Popular in the group (played by multiple users)  
+       * Or at least reasonably listened to by anyone  
+  * This curates songs that match the user’s tastes and are also “socially relevant” within our group.  
+* **Simple group / neighbor expansion (light collaborative)**  
+  * Define user-user similarity as  
+    1. Cosine between user tag distributions  
+    2. Optionally add cosine between long-term taste profiles  
+  * For a target user  
+    1. Rank the other 3 users as neighbors  
+    2. Collect tracks that  
+       * Neighbors listen to it with high ms\_played and low skip rate.  
+       * The target user has never or rarely played.  
+  * This adds the aspect of “friends listen to this and it matches your tags”
 
-```bash
-pip install -r requirements.txt
-```
+### Merge and Pre-score
 
-### Step 6 - Run the script
+* **Merge the candidates from**  
+  * Content k-NN  
+  * Tag-based expansion  
+  * Neighbor expansion  
+* For each candidate track/song, **compute a simple pre-score**  
+  * Ex: pre\_score \= max(content\_similarity\_from\_best\_centroid, group\_popularity\_score, neighbor\_signal  
+* Sort candidates by pre\_score and keep the top N per user  
+* This will give a list of candidate track IDs with basic pre-scores and metadata
 
-The below command will skip all the code that doesn't currently work due to either depricated endpoints (Spotify) or endpoints that are currently either not returning anything or are not being processed correctly (MusicBrainz).
+## Stage 2 \- Hybrid Scoring
 
-```bash
-python enrich_spotify_data.py \
-  --input data/Streaming_History_Audio_*.json \
-  --skip-audio-features --skip-spotify-genres --skip-musicbrainz
-```
+### Hybrid Scoring Logic
 
-The `*.json` glob automatically picks up all your Spotify history files and merges them into one enriched output. If you only have one file, you can also just pass it directly:
+We are conceptually computing:
 
-```bash
-python enrich_spotify_data.py \
-  --input data/Streaming_History_Audio_0.json \
-  --skip-audio-features --skip-spotify-genres --skip-musicbrainz
-```
+1. **Content score from content and tag feature** \- “does this track look like something this user likes and fits the inferred mood?”  
+2. **Group/collaborative score from group features** \- “do other members of the group listen to this and like it?”  
+3. **Score**   
+   * w\_c \= content weight  
+   * s\_c \= content-based score  
+   * w\_cf \= collaborative/group weight  
+   * s\_cf \= collaborative/group-based score  
+   * score \= w\_c \* s\_c \+ w\_cf \* s\_cf  
+4. **Output**  
+   * For each user  
+     * Compute the hybrid score for each candidate  
+     * Sort candidates by score  
+     * Keep the top K (100-200) for re-reranking
 
----
+Example:  content weight \= 0.8 and collaborative weight \= 0.2  
+Final score \= (80% "does this match my personal taste?") \+ (20% "do my teammates like this?")
 
-## Output
+**NOTE**: we can either hardcode the weights or have a small model learn the weights from labels built from ms\_played and skips.
 
-The script saves to `streaming_history_enriched.json` by default. Every entry from your original Spotify data is kept exactly as-is, with these new fields added:
+Given the candidate list for a user, compute a richer relevance score per user (user, track) by combining detailed content similarity and group popularity/neighbor behavior.
 
-| Field            | Description                                                                           |
-| ---------------- | ------------------------------------------------------------------------------------- |
-| `audio_features` | danceability, energy, valence, tempo, loudness, key, mode, etc. `null` if unavailable |
-| `sc_genres`      | Genre list from SoundCharts (e.g. `["r&b", "r&b, funk & soul"]`)                      |
-| `lastfm_tags`    | Cleaned genre tags from Last.fm (e.g. `["neo soul", "jazz", "r&b"]`)                  |
-| `mb_tags`        | Tags from MusicBrainz — only populated if the above two are both empty                |
-| `all_tags`       | Best available tags from any source — use this one for modeling                       |
+### Technical
 
-Example of what an enriched entry looks like:
+We construct a feature vector with:
 
-```json
-{
-  "ts": "2026-01-15T01:44:56Z",
-  "ms_played": 159242,
-  "master_metadata_track_name": "What You Wanna Try",
-  "master_metadata_album_artist_name": "Masego",
-  "spotify_track_uri": "spotify:track:526fD9LiAEi3KKvhhYfWmm",
-  "audio_features": {
-    "danceability": 0.88,
-    "energy": 0.58,
-    "valence": 0.5,
-    "tempo": 99.03,
-    "acousticness": 0.07,
-    "loudness": -5.93,
-    "speechiness": 0.05,
-    "instrumentalness": 0,
-    "liveness": 0.09,
-    "key": 2,
-    "mode": 1,
-    "time_signature": 4
-  },
-  "sc_genres": ["r&b", "r&b, funk & soul"],
-  "lastfm_tags": ["neo soul", "r&b", "jazz"],
-  "mb_tags": [],
-  "all_tags": ["r&b", "r&b, funk & soul"]
-}
-```
+* **Content-based features**  
+  * Similarities:  
+    * Cosine similarity between track vector and user’s long-term taste profile  
+      * Cosine similarity between track vector and the mood centroid associated with the current session  
+    * Tag overlap:  
+      * Cosine similarly between track’s tag vector and user’s tag distribution  
+      * Jaccard similarity (similarity between two sets) of top tags  
+      * Binary indicators for presence of user’s top tags in the track.  
+  * **Collaborative features**   
+    * Group popularity:  
+      * Number of users who listened to this track  
+      * Total average ms\_played across the group.  
+      * Group skip rate for this track  
+    * Neighbor-based:  
+      * For the target user, we can weigh other users by similarity and compute:  
+        * Weighted number of neighbors who listened  
+        * Weighted average ms\_played among neighbors  
+  * **Short term/session features:**  
+    * From the last N plays of this user  
+      * Percentage of similar tracks that were skipped vs completed  
+      * Average valence/energy of recent tracks (used to align with or contrast the candidate)  
+    * Simple context (optional)  
+      * Time-of-day bucket  
+      * Platform (mobile vs. desktop)
 
----
+## Stage 3 \- Re-ranking and Playlist Construction
 
-## Optional flags
+### Objective
 
-| Flag                     | What it does                                                             |
-| ------------------------ | ------------------------------------------------------------------------ |
-| `--skip-soundcharts`     | Skip SoundCharts entirely (not recommended - it's the best source)       |
-| `--skip-musicbrainz`     | Skip MusicBrainz to save time if Last.fm coverage is good enough         |
-| `--output filename.json` | Change the output file name (default: `streaming_history_enriched.json`) |
+Transform the top K scored tracks into final playlist that:
 
-Example - skip MusicBrainz for a faster run:
+* Match the user’s current mood and context  
+* Avoid tracks the user strongly dislikes or is tired of  
+* Maintain diversity and avoid being monotone or repetitive
 
-```bash
-python enrich_spotify_data.py --input data/Streaming_History_Audio_*.json --skip-musicbrainz
-```
+### Session mood detection
 
----
+For each user session:
 
-## Troubleshooting
+* Look at the last N plays (10-30 events)  
+  * Compute averages of valence, energy, danceability, tempo.  
+  * Look at tag distributions of those tracks  
+* Map this into one of a small set of mood labels, for example:  
+  * “Chill / low energy acoustic”  
+  * “Upbeat / dance / electronic”  
+  * “Hip-hop / rap”  
+  * “Indie / alternative”
 
-**Getting 403 errors from SoundCharts**
-Your credentials are wrong or your 1000 free credits are used up. Check your App ID and Token in `.env`. If out of credits, make a new account and update `.env`, the cache means you only pay for tracks not yet fetched.
+### Hard Filters
 
-**SoundCharts runs but returns 0 audio features / genres**
-This was a bug in earlier versions of the script where the API response wasn't being parsed correctly. Make sure you have the latest version of `enrich_spotify_data.py`.
+On the top K scored tracks, apply:
 
-**Script hangs and stops moving**
-Hit Ctrl+C to cancel, the cache saves after every track so no progress is lost. Re-run and it will skip everything already cached. This used to be caused by the Spotify genre lookup which would occasionally hang indefinitely due to deprication (ensure you are skipping Spotify genre/audio features!).
+* Personal dislike/fatigue  
+  * Downrank or remove tracks the user frequently skips or barely listens to.  
+  * Downrank tracks played many times in the recent window  
+* Quality filters  
+  * Remove tracks with missing essential metadata or audio features
+
+### Mood-aware Re-ranking and Diversity
+
+* Mood match:  
+  * Boost tracks whose audio features fall into the ranges implied by the current mood label  
+  * Boost tracks whose tags are consistent with the mood  
+* Diversity  
+  * Penalize consecutive tracks from the same artist  
+  * Penalize tracks with very similar tag sets place back-to-back  
+  * Optionally ensure a minimal mix of sub-genres within a playlist
+
+### Final Playlist (per user)
+
+From the re-ranked list, build a playlist. Each playlist is:
+
+* A filtered and re-ordered slice of the re-ranked list  
+* Defined by  
+  * Target mood label  
+  * Cutoff length  
+  * Diversity 
+
+# End-to-End Flow
+
+* Offline:  
+  * Person 1 builds features and profiles from the enriched data for all 4 users.  
+  * Person 2 uses those to implement candidate generation and the hybrid scorer  
+* At recommendation time for user U  
+  * Fetch U’s profile and recent history  
+  * Generate candidates via content k-NN, tags, group expansion  
+  * Compute features and hybrid scores → output top K tracks  
+  * Detect mood, re-rank with rules, and construct one or more playlists.  
+  * Display playlists to users.  
+* Evaluation and Iteration  
+  * We will heavily rely on qualitative feedback from each person and simple metrics like “would i actually listen to this playlist”  
+  * We can redefine:  
+    * What “mood” means to us  
+    * Features weights and scoring formulas  
+    * Re-ranking rules and UI
