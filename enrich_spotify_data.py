@@ -153,6 +153,9 @@ def parse_soundcharts_response(data):
 #spotify helpers 
 
 def get_spotify_token():
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        return None
+
     creds = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
     resp = requests.post(
         "https://accounts.spotify.com/api/token",
@@ -164,6 +167,9 @@ def get_spotify_token():
 
 
 def spotify_get(token, url, params=None, retries=3):
+    if not token:
+        return None
+
     headers = {"Authorization": f"Bearer {token}"}
     for attempt in range(retries):
         try:
@@ -181,6 +187,9 @@ def spotify_get(token, url, params=None, retries=3):
 
 
 def fetch_track_artist_id(token, track_id):
+    if not token:
+        return None
+
     resp = spotify_get(token, f"https://api.spotify.com/v1/tracks/{track_id}")
     if not (resp and resp.ok):
         return None
@@ -189,6 +198,9 @@ def fetch_track_artist_id(token, track_id):
 
 
 def fetch_artist_genres(token, artist_id):
+    if not token:
+        return []
+    
     resp = spotify_get(token, f"https://api.spotify.com/v1/artists/{artist_id}")
     if not (resp and resp.ok):
         return []
@@ -196,6 +208,9 @@ def fetch_artist_genres(token, artist_id):
 
 
 def fetch_audio_features_batch(token, track_ids):
+    if not token:
+        return {}
+    
     resp = spotify_get(
         token,
         "https://api.spotify.com/v1/audio-features",
