@@ -21,7 +21,7 @@ SOUNDCHARTS_APP_ID    = os.getenv("SOUNDCHARTS_APP_ID", "")
 SOUNDCHARTS_API_KEY   = os.getenv("SOUNDCHARTS_API_KEY", "")
 
 OUTPUT_FILE   = "streaming_history_enriched.json"
-# MB_USER_AGENT = "SpotifyHistoryEnricher/1.0 (email@email.com)"  # update with your email if using musicbrainz (can ignore for now)
+MB_USER_AGENT = "SpotifyHistoryEnricher/1.0 (email@email.com)"  # update with your email if using musicbrainz (can ignore for now)
 
 
 #lastfm tag cleaning (hopefully works..?)
