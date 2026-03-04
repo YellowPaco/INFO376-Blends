@@ -1,3 +1,16 @@
-requests
-tqdm
-python-dotenv
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+scipy
+
+# Evaluation & Metrics
+matplotlib
+seaborn
+
+# Live Demo UI
+ipywidgets
+
+# Saving and loading fitted sklearn models (scalers, TF-IDF, KMeans)
+joblib
