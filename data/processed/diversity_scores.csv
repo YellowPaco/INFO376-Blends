@@ -1,0 +1,5 @@
+user,n_tracks,mean_pairwise_distance,feature_std,artist_diversity
+andy,150,0.0903,0.1392,0.6133
+dishita,150,0.1074,0.1532,0.6733
+riya,150,0.1101,0.1665,0.6733
+priyanka,150,0.0912,0.1482,0.6533

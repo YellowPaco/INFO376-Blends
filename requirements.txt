@@ -8,6 +8,7 @@ scipy
 # Evaluation & Metrics
 matplotlib
 seaborn
+jupyterlab_widgets
 
 # Live Demo UI
 ipywidgets

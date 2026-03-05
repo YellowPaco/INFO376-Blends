@@ -1,0 +1,1 @@
+Here in the "result" folder will have the final playlist/output of our rec system.
