@@ -1,18 +1,10 @@
 pandas
 numpy
 scikit-learn
-matplotlib
-seaborn
 scipy
-
-# Evaluation & Metrics
 matplotlib
 seaborn
 ipywidgets
-
-# Live Demo UI
-ipywidgets
-
-# Saving and loading fitted sklearn models (scalers, TF-IDF, KMeans)
-# Saves time by removing the need to rerun notebook
+jupyterlab_widgets
 joblib
+reportlab
